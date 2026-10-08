@@ -412,6 +412,8 @@ public actor HerdrService {
     /// files the pane as an unknown terminal. Running the binary as a *child*
     /// of `/bin/sh <shim>/pi` (deliberately not `exec`) keeps a `pi` cmdline in
     /// the pane's foreground process list, which herdr matches as kind `pi`.
+    /// The script deletes its own directory before starting the binary (`sh`
+    /// keeps reading the open script), so closing the pane leaves nothing behind.
     public func startPiCompatibleAgent(
         executable: String,
         paneID: String,
@@ -432,7 +434,7 @@ public actor HerdrService {
         return
             "atomic_binary=$(command -v \(quotedExecutable)) || exit 127; "
             + "shim_dir=$(mktemp -d \"${TMPDIR:-/tmp}/herdrm-agent-shims.XXXXXX\") || exit 1; "
-            + "printf '#!/bin/sh\\n\"$HERDRM_PI_COMPATIBLE_BINARY\" \"$@\"\\n' > \"$shim_dir/pi\" && "
+            + "printf '#!/bin/sh\\nrm -rf -- \"${0%%/pi}\"\\n\"$HERDRM_PI_COMPATIBLE_BINARY\" \"$@\"\\n' > \"$shim_dir/pi\" && "
             + "chmod +x \"$shim_dir/pi\" && "
             + "HERDRM_PI_COMPATIBLE_BINARY=\"$atomic_binary\" \"$shim_dir/pi\"\(argumentSuffix); rm -rf -- \"$shim_dir\""
     }

@@ -21,9 +21,10 @@ The Atomic delta stays in this fork and is not sent upstream.
 - `Packages/HerdrKit/Sources/HerdrKit/HerdrService.swift`: `runShellCommand`,
   `startPiCompatibleAgent` and `piCompatibleShellCommand`. Atomic overwrites its
   process title, so herdr would never see `pi`. The launch writes a `pi` shell script
-  into a fresh mode-0700 `${TMPDIR:-/tmp}/herdrm-agent-shims.XXXXXX` directory, runs the
-  resolved Atomic binary as its child, and removes the directory when the agent exits.
-  herdr then classifies the pane as `pi`.
+  into a fresh mode-0700 `${TMPDIR:-/tmp}/herdrm-agent-shims.XXXXXX` directory. The
+  script deletes that directory, then runs the resolved Atomic binary as its child, so
+  closing the pane leaves nothing behind. The `/bin/sh …/pi` command line stays in the
+  pane's process list, and herdr classifies the pane as `pi`.
 - `Sources/HerdrM/AppModel.swift`:
   - `insertingAtomic` lists `atomic` after `pi` in the New Agent picker when herdr
     advertises `pi`. Local devices need the binary or a Settings override; SSH hosts

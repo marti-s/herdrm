@@ -93,7 +93,7 @@ final class PiCompatibleLaunchTests: XCTestCase {
         XCTAssertEqual(text, "SHIM_DIR_EXISTS=no\nEXIT_TRAP_SET=no\nTRAPS=\n")
     }
 
-    func testLaunchUsesFreshPrivateShimDirectoryRatherThanSharedPredictablePath() throws {
+    func testLaunchUsesFreshShimDirectoryThatIsGoneBeforeTheAgentRuns() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -104,15 +104,15 @@ final class PiCompatibleLaunchTests: XCTestCase {
 
         let capture = directory.appendingPathComponent("binary")
         let executable = directory.appendingPathComponent("fake atomic")
-        try "#!/bin/sh\nparent=$(/bin/ps -p \"$PPID\" -o command=)\nprintf '%s\\n' \"$parent\" > \"$CAPTURE_PARENT\"\nshim=${parent##* }\n/usr/bin/stat -f %Lp \"${shim%/pi}\" > \"$CAPTURE_MODE\"\nprintf '%s\\n' \"$HERDRM_PI_COMPATIBLE_BINARY\" > \"$CAPTURE_DIR\"\n".write(to: executable, atomically: true, encoding: .utf8)
+        try "#!/bin/sh\nparent=$(/bin/ps -p \"$PPID\" -o command=)\nprintf '%s\\n' \"$parent\" > \"$CAPTURE_PARENT\"\nshim=${parent##* }\nif [ -e \"${shim%/pi}\" ]; then echo present; else echo absent; fi > \"$CAPTURE_SHIM_STATE\"\nprintf '%s\\n' \"$HERDRM_PI_COMPATIBLE_BINARY\" > \"$CAPTURE_DIR\"\n".write(to: executable, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/sh")
         process.arguments = ["-c", HerdrService.piCompatibleShellCommand(executable: executable.path, args: [])]
-        let mode = directory.appendingPathComponent("shim-mode")
+        let shimState = directory.appendingPathComponent("shim-state")
         let parent = directory.appendingPathComponent("parent")
         process.environment = ProcessInfo.processInfo.environment.merging([
-            "PATH": "/usr/bin:/bin", "TMPDIR": directory.path, "CAPTURE_DIR": capture.path, "CAPTURE_MODE": mode.path, "CAPTURE_PARENT": parent.path,
+            "PATH": "/usr/bin:/bin", "TMPDIR": directory.path, "CAPTURE_DIR": capture.path, "CAPTURE_SHIM_STATE": shimState.path, "CAPTURE_PARENT": parent.path,
         ]) { _, value in value }
         try process.run()
         process.waitUntilExit()
@@ -128,7 +128,7 @@ final class PiCompatibleLaunchTests: XCTestCase {
         second.waitUntilExit()
         XCTAssertEqual(second.terminationStatus, 0)
         XCTAssertNotEqual(try String(contentsOf: parent, encoding: .utf8), parentCommand, "each launch needs a fresh shim path")
-        XCTAssertEqual(try String(contentsOf: mode, encoding: .utf8), "700\n", parentCommand)
+        XCTAssertEqual(try String(contentsOf: shimState, encoding: .utf8), "absent\n", "a killed pane must not leave the shim directory behind")
         let entries = try FileManager.default.contentsOfDirectory(atPath: directory.path)
         XCTAssertFalse(entries.contains { $0.hasPrefix("herdrm-agent-shims.") }, "private shim must be removed after exit")
         XCTAssertTrue(try FileManager.default.contentsOfDirectory(atPath: hostile.path).isEmpty)
