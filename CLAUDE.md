@@ -33,6 +33,9 @@ Design canvas (waku-style sidebar, light/dark): `design/` — published as the
   (`pane.send_input` keys). No relay yet — a second `MobileTransport` later.
 - `design/` — design canvas working files (`*.dc.html` artboards + `canvas.json`).
 
+This fork is upstream plus Atomic agent support only; see `docs/atomic-fork.md` for the
+delta and the upstream-only sync policy.
+
 ## Build & test
 
 ```sh
