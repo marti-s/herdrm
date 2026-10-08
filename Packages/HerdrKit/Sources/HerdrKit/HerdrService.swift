@@ -384,6 +384,59 @@ public actor HerdrService {
         return paneID
     }
 
+    /// Runs a command in a newly-created pane after its login shell has finished
+    /// initializing. Text and Enter are sent separately so bracketed-paste mode
+    /// cannot turn the command into an inert multiline paste.
+    public func runShellCommand(
+        _ command: String,
+        paneID: String,
+        waitForShell: Bool = false
+    ) async throws {
+        if waitForShell, let pinnedTerminalID = try? await paneTerminalID(paneID) {
+            let clock = ContinuousClock()
+            let deadline = clock.now.advanced(by: Self.paneShellReadinessTimeout)
+            while clock.now < deadline,
+                  await paneShellStillInitializing(paneID, pinnedTerminalID: pinnedTerminalID) {
+                try await Task.sleep(for: .milliseconds(100))
+            }
+        }
+        try await sendInput(paneID: paneID, text: command)
+        try await sendKeys(paneID: paneID, keys: ["enter"])
+    }
+
+    /// Launches a Pi-compatible CLI through a Pi-named wrapper *script* so
+    /// Herdr's process detector classifies forks such as Atomic as Pi.
+    ///
+    /// A symlink is not enough: Atomic sets `process.title = "atomic"` at
+    /// startup, overwriting its own argv, so herdr only ever sees `atomic` and
+    /// files the pane as an unknown terminal. Running the binary as a *child*
+    /// of `/bin/sh <shim>/pi` (deliberately not `exec`) keeps a `pi` cmdline in
+    /// the pane's foreground process list, which herdr matches as kind `pi`.
+    public func startPiCompatibleAgent(
+        executable: String,
+        paneID: String,
+        args: [String] = [],
+        waitForShell: Bool = false
+    ) async throws {
+        try await runShellCommand(
+            Self.piCompatibleShellCommand(executable: executable, args: args),
+            paneID: paneID,
+            waitForShell: waitForShell
+        )
+    }
+
+    static func piCompatibleShellCommand(executable: String, args: [String]) -> String {
+        let quotedExecutable = Self.shellQuoted(executable)
+        let quotedArguments = args.map(Self.shellQuoted).joined(separator: " ")
+        let argumentSuffix = quotedArguments.isEmpty ? "" : " \(quotedArguments)"
+        return
+            "atomic_binary=$(command -v \(quotedExecutable)) || exit 127; "
+            + "shim_dir=$(mktemp -d \"${TMPDIR:-/tmp}/herdrm-agent-shims.XXXXXX\") || exit 1; "
+            + "printf '#!/bin/sh\\n\"$HERDRM_PI_COMPATIBLE_BINARY\" \"$@\"\\n' > \"$shim_dir/pi\" && "
+            + "chmod +x \"$shim_dir/pi\" && "
+            + "HERDRM_PI_COMPATIBLE_BINARY=\"$atomic_binary\" \"$shim_dir/pi\"\(argumentSuffix); rm -rf -- \"$shim_dir\""
+    }
+
     public func startAgent(
         name: String,
         kind: String,
