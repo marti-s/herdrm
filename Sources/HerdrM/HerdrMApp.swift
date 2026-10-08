@@ -323,6 +323,7 @@ struct AgentsSettingsView: View {
         ("maki", "Maki"),
         ("muse", "Muse"),
         ("pi", "Pi"),
+        ("atomic", "Atomic"),
         ("omp", "Oh My Pi"),
     ]
 

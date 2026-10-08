@@ -286,6 +286,8 @@ final class AppModel: ObservableObject {
     private var refreshRequested: Set<UUID> = []
     private var statusGenerations: [UUID: UInt64] = [:]
     private var previousStatuses: [UUID: [String: AgentStatus]] = [:]
+    @Published var atomicPaneRefs: Set<PaneRef> = []
+    @Published var atomicWorkingPanes: Set<PaneRef> = []
 
     init() {
         let loaded = DeviceStore().load()
@@ -365,6 +367,54 @@ final class AppModel: ObservableObject {
             agent: agent,
             tabLabel: session(device.id).tabs.first { $0.tabID == agent.tabID }?.customLabel
         )
+    }
+
+    func agentDisplayKind(for entry: AgentEntry) -> String {
+        isAtomicAgent(entry) ? "atomic" : entry.agent.agent
+    }
+
+    func agentDisplayStatus(for entry: AgentEntry) -> AgentStatus {
+        let status = entry.agent.status
+        if status != .blocked && atomicWorkingPanes.contains(entry.ref) {
+            return .working
+        }
+        return status
+    }
+
+    private func isAtomicAgent(_ entry: AgentEntry) -> Bool {
+        guard entry.agent.agent == "pi" else { return false }
+        if atomicPaneRefs.contains(entry.ref) { return true }
+        let candidates: [String?] = [
+            entry.tabLabel,
+            entry.agent.name,
+            entry.agent.customTitle,
+            entry.agent.terminalTitleStripped,
+            entry.agent.terminalTitle,
+            entry.title,
+        ]
+        return candidates.compactMap { value in
+            value?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased()
+        }.contains { value in
+            value == "atomic" || value.hasPrefix("atomic-")
+        }
+    }
+
+    func refreshAtomicActivity(for entry: AgentEntry) async {
+        guard isAtomicAgent(entry),
+              let read = try? await service(for: entry.device).readPane(paneID: entry.agent.paneID),
+              !Task.isCancelled
+        else { return }
+        var next = atomicWorkingPanes
+        if AtomicActivityDetector.isWorking(in: read.text) {
+            next.insert(entry.ref)
+        } else {
+            next.remove(entry.ref)
+        }
+        if next != atomicWorkingPanes {
+            atomicWorkingPanes = next
+        }
     }
 
     struct TerminalEntry: Identifiable {
@@ -978,21 +1028,59 @@ final class AppModel: ObservableObject {
             if device(deviceID)?.isLocal == true {
                 // Herdr supports OMP through its lifecycle extension, so it has
                 // no screen-detection manifest in server.agent_manifests.
+                let overrides = AgentBinaryOverrides.load()
                 let found = await service.installedAgents(
                     from: advertised,
                     includingIntegrationKinds: ["omp"],
-                    overrides: AgentBinaryOverrides.load()
+                    overrides: overrides
                 )
-                sessions[deviceID]?.agentCatalog = .loaded(
+                var atomicPath: String?
+                if advertised.contains("pi") {
+                    atomicPath = await service.installedAgents(
+                        from: ["atomic"],
+                        overrides: overrides
+                    ).first?.path
+                }
+                let catalog = Self.insertingAtomic(
                     kinds: found.map(\.kind),
+                    piAdvertised: advertised.contains("pi"),
+                    atomicPath: atomicPath,
+                    isRemote: false,
                     paths: Dictionary(uniqueKeysWithValues: found.map { ($0.kind, $0.path) })
                 )
+                sessions[deviceID]?.agentCatalog = .loaded(
+                    kinds: catalog.kinds, paths: catalog.paths
+                )
             } else {
-                sessions[deviceID]?.agentCatalog = .loaded(kinds: advertised)
+                let catalog = Self.insertingAtomic(
+                    kinds: advertised, piAdvertised: advertised.contains("pi"),
+                    atomicPath: "atomic", isRemote: true, paths: [:]
+                )
+                sessions[deviceID]?.agentCatalog = .loaded(kinds: catalog.kinds, paths: catalog.paths)
             }
         } catch {
             sessions[deviceID]?.agentCatalog = .failed(error.localizedDescription)
         }
+    }
+
+    static func insertingAtomic(
+        kinds: [String], piAdvertised: Bool,
+        atomicPath: String?, isRemote: Bool, paths: [String: String]
+    ) -> (kinds: [String], paths: [String: String]) {
+        guard piAdvertised, let atomicPath, !kinds.contains("atomic") else {
+            return (kinds, paths)
+        }
+        var kinds = kinds
+        var paths = paths
+        if let piIndex = kinds.firstIndex(of: "pi") {
+            kinds.insert("atomic", at: piIndex + 1)
+        } else if !isRemote {
+            kinds.append("atomic")
+        } else {
+            return (kinds, paths)
+        }
+        paths["atomic"] = atomicPath
+        return (kinds, paths)
     }
 
     func reloadAgentCatalog(deviceID: UUID) {
@@ -1840,23 +1928,35 @@ final class AppModel: ObservableObject {
                     service: service, device: device, workspaceID: workspaceID, kind: kind
                 )
                 createdPane = pane
-                do {
-                    try await service.startAgent(
-                        name: kind,
-                        kind: kind,
+                if kind == "atomic" {
+                    let binary = session(device.id).agentCatalog.paths[kind]
+                        ?? HerdrService.binaryName(for: kind)
+                    try await service.startPiCompatibleAgent(
+                        executable: binary,
                         paneID: pane,
                         args: args,
                         waitForShell: true
                     )
-                } catch HerdrError.rpc(let code, _) where code == "agent_name_taken" {
-                    let suffix = String(UUID().uuidString.prefix(4)).lowercased()
-                    try await service.startAgent(
-                        name: "\(kind)-\(suffix)",
-                        kind: kind,
-                        paneID: pane,
-                        args: args,
-                        waitForShell: true
-                    )
+                    atomicPaneRefs.insert(PaneRef(deviceID: device.id, paneID: pane))
+                } else {
+                    do {
+                        try await service.startAgent(
+                            name: kind,
+                            kind: kind,
+                            paneID: pane,
+                            args: args,
+                            waitForShell: true
+                        )
+                    } catch HerdrError.rpc(let code, _) where code == "agent_name_taken" {
+                        let suffix = String(UUID().uuidString.prefix(4)).lowercased()
+                        try await service.startAgent(
+                            name: "\(kind)-\(suffix)",
+                            kind: kind,
+                            paneID: pane,
+                            args: args,
+                            waitForShell: true
+                        )
+                    }
                 }
                 await refresh(device.id)
                 isFileManagerActive = false
